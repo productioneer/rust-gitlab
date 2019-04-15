@@ -11,14 +11,17 @@
 //! Gitlab does not have consistent structures for its hooks, so they often change from
 //! version to version.
 
-use crates::chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use crates::serde::de::{Error, Unexpected};
-use crates::serde::{Deserialize, Deserializer, Serialize, Serializer};
-use crates::serde_json::{self, Value};
+use std::fmt::Formatter;
 
+use serde::de::Visitor;
+
+use crates::chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use crates::serde::{Deserialize, Deserializer, Serialize, Serializer};
+use crates::serde::de::{Error, Unexpected};
+use crates::serde_json::{self, Value};
 use types::{
     IssueId, IssueInternalId, IssueState, JobId, MergeRequestId, MergeRequestInternalId,
-    MergeRequestState, MergeStatus, MilestoneId, NoteId, NoteType, NoteableId, ObjectId, ProjectId,
+    MergeRequestState, MergeStatus, MilestoneId, NoteableId, NoteId, NoteType, ObjectId, ProjectId,
     SnippetId, UserId,
 };
 
@@ -42,16 +45,19 @@ impl<'de> Deserialize<'de> for HookDate {
     {
         let val = String::deserialize(deserializer)?;
 
-        Utc.datetime_from_str(&val, "%Y-%m-%d %H:%M:%S UTC")
+        Utc.datetime_from_str(&val, "%Y-%m-%dT%H:%M:%S%.3fZ")
             .or_else(|_| {
-                DateTime::parse_from_str(&val, "%Y-%m-%d %H:%M:%S %z")
-                    .map_err(|err| {
-                        D::Error::invalid_value(
-                            Unexpected::Other("hook date"),
-                            &format!("{:?}", err).as_str(),
-                        )
+                Utc.datetime_from_str(&val, "%Y-%m-%d %H:%M:%S UTC")
+                    .or_else(|_| {
+                        DateTime::parse_from_str(&val, "%Y-%m-%d %H:%M:%S %z")
+                            .map_err(|err| {
+                                D::Error::invalid_value(
+                                    Unexpected::Other("hook date"),
+                                    &format!("{:?}", err).as_str(),
+                                )
+                            })
+                            .map(|dt| dt.with_timezone(&Utc))
                     })
-                    .map(|dt| dt.with_timezone(&Utc))
             })
             .map(HookDate)
     }
@@ -648,7 +654,7 @@ pub struct BuildUserHookAttrs {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// Build commit information exposed in hooks.
 pub struct BuildCommitHookAttrs {
-    pub id: String,
+    pub id: u64,
     /// The object ID of the commit.
     pub sha: ObjectId,
     /// The full commit message.
@@ -683,6 +689,39 @@ pub struct BuildProjectHookAttrs {
     pub visibility_level: u64,
 }
 
+#[derive(Serialize, Debug, Clone)]
+pub struct TagString(String);
+
+struct TagStringVisitor;
+
+impl<'de> Visitor<'de> for TagStringVisitor {
+    type Value = TagString;
+
+    fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+        formatter.write_str("boolean false or string")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> where
+        E: Error, {
+        match v {
+            false => Ok(TagString("".into())),
+            true => Err(E::custom("cannot turn boolean 'true' into a meaningful tag string")),
+        }
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where
+        E: Error, {
+        Ok(TagString(v.into()))
+    }
+}
+
+impl<'de> Deserialize<'de> for TagString {
+    fn deserialize<D>(deserializer: D) -> Result<TagString, D::Error> where
+        D: Deserializer<'de> {
+        deserializer.deserialize_any(TagStringVisitor)
+    }
+}
+
 #[cfg_attr(feature = "strict", serde(deny_unknown_fields))]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 /// A build hook.
@@ -692,7 +731,7 @@ pub struct BuildHook {
     #[serde(rename = "ref")]
     /// The name of the reference that was tested.
     pub ref_: String,
-    pub tag: String,
+    pub tag: TagString,
     pub before_sha: String,
     /// The object ID that was built.
     pub sha: String,
@@ -701,15 +740,18 @@ pub struct BuildHook {
     /// The name of the build.
     pub build_name: String,
     pub build_stage: String,
+    pub build_status: String,
     /// When the build started.
     pub build_started_at: Option<HookDate>,
     /// When the build completed.
     pub build_finished_at: Option<HookDate>,
-    pub build_duration: Option<u64>,
+    pub build_duration: Option<f64>,
     /// Whether the build is allowed to fail.
     pub build_allow_failure: bool,
     /// The ID of the project.
     pub project_id: ProjectId,
+    /// The name (repo path) of the project.
+    pub project_name: String,
     /// The user which owns the build.
     pub user: BuildUserHookAttrs,
     /// The commit which was built.
